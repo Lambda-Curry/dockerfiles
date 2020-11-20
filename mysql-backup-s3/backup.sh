@@ -40,6 +40,14 @@ fi
 MYSQL_HOST_OPTS="-h $MYSQL_HOST -P $MYSQL_PORT -u$MYSQL_USER -p$MYSQL_PASSWORD"
 DUMP_START_TIME=$(date +"%Y-%m-%dT%H%M%SZ")
 
+error_notify() {
+  MESSAGE=$1
+  >&2 echo $MESSAGE
+  if [ ! "${SLACK_WEBHOOK_URL}" == "**None**" ]; then
+    curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+  fi
+}
+
 copy_s3 () {
   SRC_FILE=$1
   DEST_FILE=$2
@@ -55,11 +63,13 @@ copy_s3 () {
   cat $SRC_FILE | aws $AWS_ARGS s3 cp - s3://$S3_BUCKET/$S3_PREFIX/$DEST_FILE
 
   if [ $? != 0 ]; then
-    >&2 echo "Error uploading ${DEST_FILE} on S3"
+    error_notify "Error uploading ${DEST_FILE} on S3"
+    exit 1
   fi
 
   rm $SRC_FILE
 }
+
 # Multi file: yes
 if [ ! -z "$(echo $MULTI_FILES | grep -i -E "(yes|true|1)")" ]; then
   if [ "${MYSQLDUMP_DATABASE}" == "--all-databases" ]; then
@@ -73,7 +83,12 @@ if [ ! -z "$(echo $MULTI_FILES | grep -i -E "(yes|true|1)")" ]; then
 
     DUMP_FILE="/tmp/${DB}.sql.gz"
 
+    echo "mysqldump $MYSQL_HOST_OPTS $MYSQLDUMP_OPTIONS --databases $DB | gzip > $DUMP_FILE"
+
     mysqldump $MYSQL_HOST_OPTS $MYSQLDUMP_OPTIONS --databases $DB | gzip > $DUMP_FILE
+    if [ $? != 0 ]; then
+      error_notify "Failed to execute mysqldump"
+    fi
 
     if [ $? == 0 ]; then
       if [ "${S3_FILENAME}" == "**None**" ]; then
@@ -84,7 +99,7 @@ if [ ! -z "$(echo $MULTI_FILES | grep -i -E "(yes|true|1)")" ]; then
 
       copy_s3 $DUMP_FILE $S3_FILE
     else
-      >&2 echo "Error creating dump of ${DB}"
+      error_notify "Error creating dump of ${DB}"
     fi
   done
 # Multi file: no
@@ -92,6 +107,8 @@ else
   echo "Creating dump for ${MYSQLDUMP_DATABASE} from ${MYSQL_HOST}..."
 
   DUMP_FILE="/tmp/dump.sql.gz"
+
+  echo "mysqldump $MYSQL_HOST_OPTS $MYSQLDUMP_OPTIONS $MYSQLDUMP_DATABASE | gzip > $DUMP_FILE"
   mysqldump $MYSQL_HOST_OPTS $MYSQLDUMP_OPTIONS $MYSQLDUMP_DATABASE | gzip > $DUMP_FILE
 
   if [ $? == 0 ]; then
@@ -100,10 +117,9 @@ else
     else
       S3_FILE="${S3_FILENAME}.sql.gz"
     fi
-
     copy_s3 $DUMP_FILE $S3_FILE
   else
-    >&2 echo "Error creating dump of all databases"
+    error_notify "Error creating dump of all databases"
   fi
 fi
 
